@@ -645,6 +645,9 @@ class rrule(rrulebase):
         if self._count:
             parts.append('COUNT=' + str(self._count))
 
+        if self._until:
+            parts.append('UNTIL=' + str(self._until))
+
         if self._original_rule.get('byweekday') is not None:
             # The str() method on weekday objects doesn't generate
             # RFC2445-compliant strings, so we should modify that.
