@@ -8,6 +8,7 @@ including support for caching of results.
 import itertools
 import datetime
 import calendar
+import pytz
 import sys
 
 from fractions import gcd
@@ -646,7 +647,10 @@ class rrule(rrulebase):
             parts.append('COUNT=' + str(self._count))
 
         if self._until:
-            parts.append('UNTIL=' + self._until.strftime('%Y%m%dT%H%M%S'))
+            if self._until.tzinfo == pytz.utc:
+                parts.append('UNTIL=' + self._until.strftime('%Y%m%dT%H%M%SZ'))
+            else:
+                parts.append('UNTIL=' + self._until.strftime('%Y%m%dT%H%M%S'))
 
         if self._original_rule.get('byweekday') is not None:
             # The str() method on weekday objects doesn't generate
