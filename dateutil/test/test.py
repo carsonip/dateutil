@@ -2,20 +2,14 @@
 from __future__ import unicode_literals
 
 import calendar
-import base64
-import sys
-
-from six import StringIO, BytesIO, PY3
 
 try:
-    # python2.6 unittest has no skipUnless. So we use unittest2.
-    # if you have python >= 2.7, you don't need unittest2, but it won't harm
+    # Needed in Python 2.6 or assertRaisesRegex
     import unittest2 as unittest
 except ImportError:
     import unittest
 
-MISSING_TARBALL = ("This test fails if you don't have the dateutil "
-                   "timezone file installed. Please read the README")
+from six import assertRaisesRegex, PY3
 
 from datetime import *
 
@@ -23,16 +17,61 @@ from dateutil.relativedelta import *
 from dateutil.parser import *
 from dateutil.easter import *
 from dateutil.rrule import *
-from dateutil.tz import *
-from dateutil import zoneinfo
 
-try:
-    from dateutil import tzwin
-except ImportError:
-    pass
+from dateutil.tz import tzoffset
+
+import warnings
 
 
-class RelativeDeltaTest(unittest.TestCase):
+class WarningTestMixin(object):
+    # Based on https://stackoverflow.com/a/12935176/467366
+    class _AssertWarnsContext(warnings.catch_warnings):
+        def __init__(self, expected_warnings, parent, **kwargs):
+            super(WarningTestMixin._AssertWarnsContext, self).__init__(**kwargs)
+
+            self.parent = parent
+            try:
+                self.expected_warnings = list(expected_warnings)
+            except TypeError:
+                self.expected_warnings = [expected_warnings]
+
+            self._warning_log = []
+
+        def __enter__(self, *args, **kwargs):
+            rv = super(WarningTestMixin._AssertWarnsContext, self).__enter__(*args, **kwargs)
+
+            if self._showwarning is not self._module.showwarning:
+                super_showwarning = self._module.showwarning
+            else:
+                super_showwarning = None
+
+            def showwarning(*args, **kwargs):
+                if super_showwarning is not None:
+                    super_showwarning(*args, **kwargs)
+
+                self._warning_log.append(warnings.WarningMessage(*args, **kwargs))
+
+            self._module.showwarning = showwarning
+            return rv
+
+        def __exit__(self, *args, **kwargs):
+            super(WarningTestMixin._AssertWarnsContext, self).__exit__(self, *args, **kwargs)
+
+            self.parent.assertTrue(any(issubclass(item.category, warning)
+                                       for warning in self.expected_warnings
+                                       for item in self._warning_log))
+
+    def assertWarns(self, warning, callable=None, *args, **kwargs):
+        warnings.simplefilter('always')
+        context = self.__class__._AssertWarnsContext(warning, self)
+        if callable is None:
+            return context
+        else:
+            with context:
+                callable(*args, **kwargs)
+
+
+class RelativeDeltaTest(WarningTestMixin, unittest.TestCase):
     now = datetime(2003, 9, 17, 20, 54, 47, 282310)
     today = date(2003, 9, 17)
 
@@ -224,6 +263,17 @@ class RelativeDeltaTest(unittest.TestCase):
         self.assertFalse(relativedelta(days=0))
         self.assertTrue(relativedelta(days=1))
 
+    def testComparison(self):
+        d1 = relativedelta(years=1, months=1, days=1, leapdays=0, hours=1, 
+                           minutes=1, seconds=1, microseconds=1)
+        d2 = relativedelta(years=1, months=1, days=1, leapdays=0, hours=1, 
+                           minutes=1, seconds=1, microseconds=1)
+        d3 = relativedelta(years=1, months=1, days=1, leapdays=0, hours=1, 
+                           minutes=1, seconds=1, microseconds=2)
+
+        self.assertEqual(d1, d2)
+        self.assertNotEqual(d1, d3)
+
     def testWeeks(self):
         # Test that the weeks property is working properly.
         rd = relativedelta(years=4, months=2, weeks=8, days=6)
@@ -232,8 +282,207 @@ class RelativeDeltaTest(unittest.TestCase):
         rd.weeks = 3
         self.assertEqual((rd.weeks, rd.days), (3, 3 * 7 + 6))
 
+    def testRelativeDeltaFractionalYear(self):
+        with self.assertRaises(ValueError):
+            relativedelta(years=1.5)
 
-class RRuleTest(unittest.TestCase):
+    def testRelativeDeltaFractionalMonth(self):
+        with self.assertRaises(ValueError):
+            relativedelta(months=1.5)
+
+    def testRelativeDeltaFractionalAbsolutes(self):
+        # Fractional absolute values will soon be unsupported,
+        # check for the deprecation warning.
+        with self.assertWarns(DeprecationWarning):
+            relativedelta(year=2.86)
+        
+        with self.assertWarns(DeprecationWarning):
+            relativedelta(month=1.29)
+
+        with self.assertWarns(DeprecationWarning):
+            relativedelta(day=0.44)
+
+        with self.assertWarns(DeprecationWarning):
+            relativedelta(hour=23.98)
+
+        with self.assertWarns(DeprecationWarning):
+            relativedelta(minute=45.21)
+
+        with self.assertWarns(DeprecationWarning):
+            relativedelta(second=13.2)
+
+        with self.assertWarns(DeprecationWarning):
+            relativedelta(microsecond=157221.93)
+
+    def testRelativeDeltaFractionalRepr(self):
+        rd = relativedelta(years=3, months=-2, days=1.25)
+
+        self.assertEqual(repr(rd),
+                         'relativedelta(years=+3, months=-2, days=+1.25)')
+
+        rd = relativedelta(hours=0.5, seconds=9.22)
+        self.assertEqual(repr(rd),
+                         'relativedelta(hours=+0.5, seconds=+9.22)')
+
+    def testRelativeDeltaFractionalWeeks(self):
+        # Equivalent to days=8, hours=18
+        rd = relativedelta(weeks=1.25)
+        d1 = datetime(2009, 9, 3, 0, 0)
+        self.assertEqual(d1 + rd,
+                         datetime(2009, 9, 11, 18))
+
+    def testRelativeDeltaFractionalDays(self):
+        rd1 = relativedelta(days=1.48)
+
+        d1 = datetime(2009, 9, 3, 0, 0)
+        self.assertEqual(d1 + rd1,
+                         datetime(2009, 9, 4, 11, 31, 12))
+
+        rd2 = relativedelta(days=1.5)
+        self.assertEqual(d1 + rd2,
+                         datetime(2009, 9, 4, 12, 0, 0))
+
+    def testRelativeDeltaFractionalHours(self):
+        rd = relativedelta(days=1, hours=12.5)
+        d1 = datetime(2009, 9, 3, 0, 0)
+        self.assertEqual(d1 + rd,
+                         datetime(2009, 9, 4, 12, 30, 0))
+
+    def testRelativeDeltaFractionalMinutes(self):
+        rd = relativedelta(hours=1, minutes=30.5)
+        d1 = datetime(2009, 9, 3, 0, 0)
+        self.assertEqual(d1 + rd,
+                         datetime(2009, 9, 3, 1, 30, 30))
+
+    def testRelativeDeltaFractionalSeconds(self):
+        rd = relativedelta(hours=5, minutes=30, seconds=30.5)
+        d1 = datetime(2009, 9, 3, 0, 0)
+        self.assertEqual(d1 + rd,
+                         datetime(2009, 9, 3, 5, 30, 30, 500000))
+
+    def testRelativeDeltaFractionalPositiveOverflow(self):
+        # Equivalent to (days=1, hours=14)
+        rd1 = relativedelta(days=1.5, hours=2)
+        d1 = datetime(2009, 9, 3, 0, 0)
+        self.assertEqual(d1 + rd1,
+                         datetime(2009, 9, 4, 14, 0, 0))
+
+        # Equivalent to (days=1, hours=14, minutes=45)
+        rd2 = relativedelta(days=1.5, hours=2.5, minutes=15)
+        d1 = datetime(2009, 9, 3, 0, 0)
+        self.assertEqual(d1 + rd2,
+                         datetime(2009, 9, 4, 14, 45))
+
+        # Carry back up - equivalent to (days=2, hours=2, minutes=0, seconds=1)
+        rd3 = relativedelta(days=1.5, hours=13, minutes=59.5, seconds=31)
+        self.assertEqual(d1 + rd3,
+                         datetime(2009, 9, 5, 2, 0, 1))
+
+    def testRelativeDeltaFractionalNegativeDays(self):
+        # Equivalent to (days=-1, hours=-1)
+        rd1 = relativedelta(days=-1.5, hours=11)
+        d1 = datetime(2009, 9, 3, 12, 0)
+        self.assertEqual(d1 + rd1,
+                         datetime(2009, 9, 2, 11, 0, 0))
+
+        # Equivalent to (days=-1, hours=-9)
+        rd2 = relativedelta(days=-1.25, hours=-3)
+        self.assertEqual(d1 + rd2,
+            datetime(2009, 9, 2, 3))
+
+    def testRelativeDeltaNormalizeFractionalDays(self):
+        # Equivalent to (days=2, hours=18)
+        rd1 = relativedelta(days=2.75)
+
+        self.assertEqual(rd1.normalized(), relativedelta(days=2, hours=18))
+
+        # Equvalent to (days=1, hours=11, minutes=31, seconds=12)
+        rd2 = relativedelta(days=1.48)
+
+        self.assertEqual(rd2.normalized(),
+            relativedelta(days=1, hours=11, minutes=31, seconds=12))
+
+    def testRelativeDeltaNormalizeFractionalDays(self):
+        # Equivalent to (hours=1, minutes=30)
+        rd1 = relativedelta(hours=1.5)
+
+        self.assertEqual(rd1.normalized(), relativedelta(hours=1, minutes=30))
+
+        # Equivalent to (hours=3, minutes=17, seconds=5, microseconds=100)
+        rd2 = relativedelta(hours=3.28472225)
+
+        self.assertEqual(rd2.normalized(),
+            relativedelta(hours=3, minutes=17, seconds=5, microseconds=100))
+
+    def testRelativeDeltaNormalizeFractionalMinutes(self):
+        # Equivalent to (minutes=15, seconds=36)
+        rd1 = relativedelta(minutes=15.6)
+
+        self.assertEqual(rd1.normalized(),
+            relativedelta(minutes=15, seconds=36))
+
+        # Equivalent to (minutes=25, seconds=20, microseconds=25000)
+        rd2 = relativedelta(minutes=25.33375)
+
+        self.assertEqual(rd2.normalized(),
+            relativedelta(minutes=25, seconds=20, microseconds=25000))
+
+    def testRelativeDeltaNormalizeFractionalSeconds(self):
+        # Equivalent to (seconds=45, microseconds=25000)
+        rd1 = relativedelta(seconds=45.025)
+        self.assertEqual(rd1.normalized(),
+            relativedelta(seconds=45, microseconds=25000))
+
+    def testRelativeDeltaFractionalPositiveOverflow(self):
+        # Equivalent to (days=1, hours=14)
+        rd1 = relativedelta(days=1.5, hours=2)
+        self.assertEqual(rd1.normalized(),
+            relativedelta(days=1, hours=14))
+
+        # Equivalent to (days=1, hours=14, minutes=45)
+        rd2 = relativedelta(days=1.5, hours=2.5, minutes=15)
+        self.assertEqual(rd2.normalized(),
+            relativedelta(days=1, hours=14, minutes=45))
+
+        # Carry back up - equivalent to:
+        # (days=2, hours=2, minutes=0, seconds=2, microseconds=3)
+        rd3 = relativedelta(days=1.5, hours=13, minutes=59.50045,
+                            seconds=31.473, microseconds=500003)
+        self.assertEqual(rd3.normalized(),
+            relativedelta(days=2, hours=2, minutes=0,
+                          seconds=2, microseconds=3))
+
+    def testRelativeDeltaFractionalNegativeOverflow(self):
+        # Equivalent to (days=-1)
+        rd1 = relativedelta(days=-0.5, hours=-12)
+        self.assertEqual(rd1.normalized(),
+            relativedelta(days=-1))
+
+        # Equivalent to (days=-1)
+        rd2 = relativedelta(days=-1.5, hours=12)
+        self.assertEqual(rd2.normalized(),
+            relativedelta(days=-1))
+
+        # Equivalent to (days=-1, hours=-14, minutes=-45)
+        rd3 = relativedelta(days=-1.5, hours=-2.5, minutes=-15)
+        self.assertEqual(rd3.normalized(),
+            relativedelta(days=-1, hours=-14, minutes=-45))
+
+        # Equivalent to (days=-1, hours=-14, minutes=+15)
+        rd4 = relativedelta(days=-1.5, hours=-2.5, minutes=45)
+        self.assertEqual(rd4.normalized(),
+            relativedelta(days=-1, hours=-14, minutes=+15))
+
+        # Carry back up - equivalent to:
+        # (days=-2, hours=-2, minutes=0, seconds=-2, microseconds=-3)
+        rd3 = relativedelta(days=-1.5, hours=-13, minutes=-59.50045,
+                            seconds=-31.473, microseconds=-500003)
+        self.assertEqual(rd3.normalized(),
+            relativedelta(days=-2, hours=-2, minutes=0,
+                          seconds=-2, microseconds=-3))
+
+
+class RRuleTest(WarningTestMixin, unittest.TestCase):
     def _rrulestr_reverse_test(self, rule):
         """
         Call with an `rrule` and it will test that `str(rrule)` generates a
@@ -2566,9 +2815,17 @@ class RRuleTest(unittest.TestCase):
         self.assertRaises(ValueError, make_bad_minute_rrule)
         self.assertRaises(ValueError, make_bad_hour_rrule)
 
+    def testBadUntilCountRRule(self):
+        """
+        See rfc-2445 4.3.10 - This checks for the deprecation warning, and will
+        eventually check for an error.
+        """
+        with self.assertWarns(DeprecationWarning):
+            rrule(DAILY, dtstart=datetime(1997, 9, 2, 9, 0),
+                         count=3, until=datetime(1997, 9, 4, 9, 0))
+
     def testUntilNotMatching(self):
         self.assertEqual(list(rrule(DAILY,
-                              count=3,
                               dtstart=datetime(1997, 9, 2, 9, 0),
                               until=datetime(1997, 9, 5, 8, 0))),
                          [datetime(1997, 9, 2, 9, 0),
@@ -2577,7 +2834,6 @@ class RRuleTest(unittest.TestCase):
 
     def testUntilMatching(self):
         self.assertEqual(list(rrule(DAILY,
-                              count=3,
                               dtstart=datetime(1997, 9, 2, 9, 0),
                               until=datetime(1997, 9, 4, 9, 0))),
                          [datetime(1997, 9, 2, 9, 0),
@@ -2586,21 +2842,18 @@ class RRuleTest(unittest.TestCase):
 
     def testUntilSingle(self):
         self.assertEqual(list(rrule(DAILY,
-                              count=3,
                               dtstart=datetime(1997, 9, 2, 9, 0),
                               until=datetime(1997, 9, 2, 9, 0))),
                          [datetime(1997, 9, 2, 9, 0)])
 
     def testUntilEmpty(self):
         self.assertEqual(list(rrule(DAILY,
-                              count=3,
                               dtstart=datetime(1997, 9, 2, 9, 0),
                               until=datetime(1997, 9, 1, 9, 0))),
                          [])
 
     def testUntilWithDate(self):
         self.assertEqual(list(rrule(DAILY,
-                              count=3,
                               dtstart=datetime(1997, 9, 2, 9, 0),
                               until=date(1997, 9, 5))),
                          [datetime(1997, 9, 2, 9, 0),
@@ -4738,6 +4991,10 @@ class ParserTest(unittest.TestCase):
             self.uni_str = str(base_str)
             self.str_str = bytes(base_str.encode())
 
+    def testEmptyString(self):
+        with self.assertRaises(ValueError):
+            parse('')
+
     def testDateCommandFormat(self):
         self.assertEqual(parse("Thu Sep 25 10:36:28 BRST 2003",
                                tzinfos=self.tzinfos),
@@ -4872,6 +5129,10 @@ class ParserTest(unittest.TestCase):
     def testISOStrippedFormatStrip5(self):
         self.assertEqual(parse("20030925"),
                          datetime(2003, 9, 25))
+
+    def testPythonLoggerFormat(self):
+        self.assertEqual(parse("2003-09-25 10:49:41,502"),
+                         datetime(2003, 9, 25, 10, 49, 41, 502000))
 
     def testNoSeparator1(self):
         self.assertEqual(parse("199709020908"),
@@ -5093,6 +5354,13 @@ class ParserTest(unittest.TestCase):
         self.assertEqual(parse("10 h 36", default=self.default),
                          datetime(2003, 9, 25, 10, 36))
 
+    def testAMPMNoHour(self):
+        with self.assertRaises(ValueError):
+            parse("AM")
+
+        with self.assertRaises(ValueError):
+            parse("Jan 20, 2015 PM")
+
     def testHourAmPm1(self):
         self.assertEqual(parse("10h am", default=self.default),
                          datetime(2003, 9, 25, 10))
@@ -5140,6 +5408,13 @@ class ParserTest(unittest.TestCase):
     def testHourAmPm12(self):
         self.assertEqual(parse("10:00p.m.", default=self.default),
                          datetime(2003, 9, 25, 22))
+
+    def testAMPMRange(self):
+        with self.assertRaises(ValueError):
+            parse("13:44 AM")
+
+        with self.assertRaises(ValueError):
+            parse("January 25, 1921 23:13 PM")
 
     def testPertain(self):
         self.assertEqual(parse("Sep 03", default=self.default),
@@ -5193,6 +5468,11 @@ class ParserTest(unittest.TestCase):
         self.assertEqual(parse(s2, fuzzy=True), datetime(2020, 6, 8))
         self.assertEqual(parse(s3, fuzzy=True), datetime(2003, 12, 3, 3))
         self.assertEqual(parse(s4, fuzzy=True), datetime(2003, 12, 3, 3))
+
+    def testFuzzyIgnoreAMPM(self):
+        s1 = "Jan 29, 1945 14:45 AM I going to see you there?"
+
+        self.assertEqual(parse(s1, fuzzy=True), datetime(1945, 1, 29, 14, 45))
 
     def testExtraSpace(self):
         self.assertEqual(parse("  July   4 ,  1976   12:01:02   am  "),
@@ -5336,168 +5616,42 @@ class ParserTest(unittest.TestCase):
         self.assertEqual(parse("2004 10 Apr 11h30m", default=self.default),
                          datetime(2004, 4, 10, 11, 30))
 
-    # Test that if a year is omitted, we use the most recent matching value
-    def testSmartDefaultsNoYearMonthEarlier(self):
-        self.assertEqual(parse("August 3", default=datetime(2014, 5, 1),
-                               smart_defaults=True), 
-                         datetime(2013, 8, 3))
+    def test_99_ad(self):
+        self.assertEqual(parse('0099-01-01T00:00:00'),
+                         datetime(99, 1, 1, 0, 0))
 
-    def testSmartDefaultsNoYearDayEarlier(self):        
-        self.assertEqual(parse("August 3", default=datetime(2014, 8, 1),
-                               smart_defaults=True), 
-                         datetime(2013, 8, 3))
+    def test_31_ad(self):
+        self.assertEqual(parse('0031-01-01T00:00:00'),
+                         datetime(31, 1, 1, 0, 0))
 
-    def testSmartDefaultsNoYearSameDay(self):
-        self.assertEqual(parse("August 3", default=datetime(2014, 8, 3),
-                               smart_defaults=True), 
-                         datetime(2014, 8, 3))
+    def testInvalidDay(self):
+        with self.assertRaises(ValueError):
+            parse("Feb 30, 2007")
 
-    def testSmartDefaultsNoYearDayLater(self):
-        self.assertEqual(parse("August 3", default=datetime(2014, 8, 4),
-                               smart_defaults=True), 
-                         datetime(2014, 8, 3))
-    
-    def testSmartDefaultsNoYearMonthLater(self):
-        self.assertEqual(parse("August 3", default=datetime(2014, 12, 19),
-                               smart_defaults=True), 
-                         datetime(2014, 8, 3))
-
-    def testSmartDefaultsNoYearFeb29(self):
-        self.assertEqual(parse("February 29", default=datetime(2014, 12, 19),
-                               date_in_future=False, smart_defaults=True),
-                         datetime(2012, 2, 29))
-
-    def testSmartDefaultsNoYearFeb29Y2100(self):
-        # Year 2000 was not a leap year.
-        self.assertEqual(parse("February 29", default=datetime(2100, 12, 19),
-                               smart_defaults=True),
-                         datetime(2096, 2, 29))
-
-    # Test that if a year is omitted, we use the most next matching value
-    def testSmartDefaultsNoYearFutureDayEarlier(self):
-        self.assertEqual(parse("August 3", default=datetime(2014, 5, 1),
-                               date_in_future=True, smart_defaults=True),
-                         datetime(2014, 8, 3))
-
-    def testSmartDefaultsNoYearFutureMonthEarlier(self):
-        self.assertEqual(parse("August 3", default=datetime(2014, 8, 1),
-                               date_in_future=True, smart_defaults=True),
-                         datetime(2014, 8, 3))
-
-    def testSmartDefaultsNoYearFutureSameDay(self):
-        self.assertEqual(parse("August 3", default=datetime(2014, 8, 3),
-                               date_in_future=True, smart_defaults=True),
-                         datetime(2014, 8, 3))
-
-    def testSmartDefaultsNoYearFutureDayLater(self):
-        self.assertEqual(parse("August 3", default=datetime(2014, 8, 4),
-                               date_in_future=True, smart_defaults=True),
-                         datetime(2015, 8, 3))
-    
-    def testSmartDefaultsNoYearFutureMonthLater(self):
-        self.assertEqual(parse("August 3", default=datetime(2014, 12, 19),
-                               date_in_future=True, smart_defaults=True),
-                         datetime(2015, 8, 3))
-
-    def testSmartDefaultsNoYearFutureFeb29Y2100(self):
-        self.assertEqual(parse("February 29", default=datetime(2098, 12, 19),
-                               date_in_future=True, smart_defaults=True),
-                         datetime(2104, 2, 29))
-
-    # Test that if only a month is provided, we select the beginning of the most recent
-    # occurrence of the specified month
-    def testSmartDefaultsMonthOnlyMonthEarlier(self):
-        self.assertEqual(parse("September", default=datetime(2014, 5, 1),
-                               smart_defaults=True),
-                         datetime(2013, 9, 1))
-
-    def testSmartDefaultsMonthOnlySameMonthFirstDay(self):
-        self.assertEqual(parse("September", default=datetime(2014, 9, 1),
-                               smart_defaults=True),
-                         datetime(2014, 9, 1))
-
-    def testSmartDefaultsMonthOnlySameMonthLastDay(self):
-        self.assertEqual(parse("September", default=datetime(2014, 9, 30),
-                               smart_defaults=True),
-                         datetime(2014, 9, 1))
-
-    def testSmartDefaultMonthOnlyMonthLater(self):
-        self.assertEqual(parse("September", default=datetime(2014, 11, 1),
-                               smart_defaults=True),
-                         datetime(2014, 9, 1))
-
-    # Test that if only a month is provided, we select the beginning of the most recent
-    # occurrence of the specified month
-    def testSmartDefaultsMonthOnlyFutureMonthEarlier(self):
-        self.assertEqual(parse("September", default=datetime(2014, 5, 1),
-                               date_in_future=True, smart_defaults=True),
-                         datetime(2014, 9, 1))
-
-    def testSmartDefaultsMonthOnlyFutureSameMonthFirstDay(self):
-        self.assertEqual(parse("September", default=datetime(2014, 9, 1),
-                               date_in_future=True, smart_defaults=True),
-                         datetime(2014, 9, 1))
-
-    def testSmartDefaultsMonthOnlyFutureSameMonthLastDay(self):
-        self.assertEqual(parse("September", default=datetime(2014, 9, 30),
-                               date_in_future=True, smart_defaults=True),
-                         datetime(2014, 9, 1))
-    
-    def testSmartDefaultsMonthOnlyFutureMonthLater(self):
-        self.assertEqual(parse("September", default=datetime(2014, 11, 1),
-                               date_in_future=True, smart_defaults=True),
-                         datetime(2015, 9, 1))
-
-    # Test to ensure that if a year is specified, January 1st of that year is
-    # returned.
-    def testSmartDefaultsYearOnly(self):
-        self.assertEqual(parse("2009", smart_defaults=True),
-                         datetime(2009, 1, 1))
-
-    def testSmartDefaultsYearOnlyFuture(self):
-        self.assertEqual(parse("2009", smart_defaults=True,
-                               date_in_future=True),
-                         datetime(2009, 1, 1))
-
-    # Tests that invalid days fall back to the end of the month if that's
-    # the desired behavior.
-    def testInvalidDayNoFallback(self):
-        self.assertRaises(ValueError, parse, "Feb 30, 2007",
-                          **{'fallback_on_invalid_day':False})
-
-    def testInvalidDayFallbackFebNoLeapYear(self):
-        self.assertEqual(parse("Feb 31, 2007", fallback_on_invalid_day=True),
-                         datetime(2007, 2, 28))
-
-    def testInvalidDayFallbackFebLeapYear(self):
-        self.assertEqual(parse("Feb 31, 2008", fallback_on_invalid_day=True),
-                         datetime(2008, 2, 29))
-
-    def testUnspecifiedDayNoFallback(self):
-        self.assertRaises(ValueError, parse, "April 2009",
-                          **{'fallback_on_invalid_day':False,
-                             'default':datetime(2010, 1, 31)})
-
-    def testUnspecifiedDayUnspecifiedFallback(self):
+    def testUnspecifiedDayFallback(self):
+        # Test that for an unspecified day, the fallback behavior is correct.
         self.assertEqual(parse("April 2009", default=datetime(2010, 1, 31)),
                          datetime(2009, 4, 30))
 
-    def testUnspecifiedDayUnspecifiedFallback(self):
-        self.assertEqual(parse("April 2009", fallback_on_invalid_day=True,
-                               default=datetime(2010, 1, 31)),
-                         datetime(2009, 4, 30))
-
-    def testUnspecifiedDayUnspecifiedFallbackFebNoLeapYear(self):        
+    def testUnspecifiedDayFallbackFebNoLeapYear(self):        
         self.assertEqual(parse("Feb 2007", default=datetime(2010, 1, 31)),
                          datetime(2007, 2, 28))
 
-    def testUnspecifiedDayUnspecifiedFallbackFebLeapYear(self):        
+    def testUnspecifiedDayFallbackFebLeapYear(self):        
         self.assertEqual(parse("Feb 2008", default=datetime(2010, 1, 31)),
                          datetime(2008, 2, 29))
 
     def testErrorType01(self):
         self.assertRaises(ValueError,
                           parse, 'shouldfail')
+
+    def testCorrectErrorOnFuzzyWithTokens(self):
+        assertRaisesRegex(self, ValueError, 'Unknown string format',
+                          parse, '04/04/32/423', fuzzy_with_tokens=True)
+        assertRaisesRegex(self, ValueError, 'Unknown string format',
+                          parse, '04/04/04 +32423', fuzzy_with_tokens=True)
+        assertRaisesRegex(self, ValueError, 'Unknown string format',
+                          parse, '04/04/0d4', fuzzy_with_tokens=True)
 
     def testIncreasingCTime(self):
         # This test will check 200 different years, every month, every day,
@@ -5558,6 +5712,26 @@ class ParserTest(unittest.TestCase):
 
         self.assertEqual(parser().parse(self.str_str),
                          parser().parse(self.uni_str))
+
+    def testParseUnicodeWords(self):
+
+        class rus_parserinfo(parserinfo):
+            MONTHS = [("янв", "Январь"),
+                      ("фев", "Февраль"),
+                      ("мар", "Март"),
+                      ("апр", "Апрель"),
+                      ("май", "Май"),
+                      ("июн", "Июнь"),
+                      ("июл", "Июль"),
+                      ("авг", "Август"),
+                      ("сен", "Сентябрь"),
+                      ("окт", "Октябрь"),
+                      ("ноя", "Ноябрь"),
+                      ("дек", "Декабрь")]
+
+        self.assertEqual(parse('10 Сентябрь 2015 10:20',
+                               parserinfo=rus_parserinfo()),
+                         datetime(2015, 9, 10, 10, 20))
 
 
 class EasterTest(unittest.TestCase):
@@ -5637,306 +5811,5 @@ class EasterTest(unittest.TestCase):
             self.assertEqual(western,  easter(western.year,  EASTER_WESTERN))
             self.assertEqual(orthodox, easter(orthodox.year, EASTER_ORTHODOX))
 
-class TZTest(unittest.TestCase):
-
-    TZFILE_EST5EDT = b"""
-VFppZgAAAAAAAAAAAAAAAAAAAAAAAAAEAAAABAAAAAAAAADrAAAABAAAABCeph5wn7rrYKCGAHCh
-ms1gomXicKOD6eCkaq5wpTWnYKZTyvCnFYlgqDOs8Kj+peCqE47wqt6H4KvzcPCsvmngrdNS8K6e
-S+CvszTwsH4t4LGcUXCyZ0pgs3wzcLRHLGC1XBVwticOYLc793C4BvBguRvZcLnm0mC7BPXwu8a0
-YLzk1/C9r9DgvsS58L+PsuDApJvwwW+U4MKEffDDT3bgxGRf8MUvWODGTXxwxw864MgtXnDI+Fdg
-yg1AcMrYOWDLiPBw0iP0cNJg++DTdeTw1EDd4NVVxvDWIL/g1zWo8NgAoeDZFYrw2eCD4Nr+p3Db
-wGXg3N6JcN2pgmDevmtw34lkYOCeTXDhaUZg4n4vcONJKGDkXhFw5Vcu4OZHLfDnNxDg6CcP8OkW
-8uDqBvHw6vbU4Ovm0/Ds1rbg7ca18O6/02Dvr9Jw8J+1YPGPtHDyf5dg82+WcPRfeWD1T3hw9j9b
-YPcvWnD4KHfg+Q88cPoIWeD6+Fjw++g74PzYOvD9yB3g/rgc8P+n/+AAl/7wAYfh4AJ34PADcP5g
-BGD9cAVQ4GAGQN9wBzDCYAeNGXAJEKRgCa2U8ArwhmAL4IVwDNmi4A3AZ3AOuYTgD6mD8BCZZuAR
-iWXwEnlI4BNpR/AUWSrgFUkp8BY5DOAXKQvwGCIpYBkI7fAaAgtgGvIKcBvh7WAc0exwHcHPYB6x
-znAfobFgIHYA8CGBk2AiVeLwI2qv4CQ1xPAlSpHgJhWm8Ccqc+An/sNwKQpV4CnepXAq6jfgK76H
-cCzTVGAtnmlwLrM2YC9+S3AwkxhgMWdn8DJy+mAzR0nwNFLcYDUnK/A2Mr5gNwcN8Dgb2uA45u/w
-Ofu84DrG0fA7257gPK/ucD27gOA+j9BwP5ti4EBvsnBBhH9gQk+UcENkYWBEL3ZwRURDYEYPWHBH
-JCVgR/h08EkEB2BJ2FbwSuPpYEu4OPBMzQXgTZga8E6s5+BPd/zwUIzJ4FFhGXBSbKvgU0D7cFRM
-jeBVIN1wVixv4FcAv3BYFYxgWOChcFn1bmBawINwW9VQYFypn/BdtTJgXomB8F+VFGBgaWPwYX4w
-4GJJRfBjXhLgZCkn8GU99OBmEkRwZx3W4GfyJnBo/bjgadIIcGrdmuBrsepwbMa3YG2RzHBupplg
-b3GucHCGe2BxWsrwcmZdYHM6rPB0Rj9gdRqO8HYvW+B2+nDweA894HjaUvB57x/gero08HvPAeB8
-o1Fwfa7j4H6DM3B/jsXgAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQAB
-AAEAAQABAgMBAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQAB
-AAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEA
-AQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQAB
-AAEAAQABAAEAAQABAAEAAQABAAEAAf//x8ABAP//ubAABP//x8ABCP//x8ABDEVEVABFU1QARVdU
-AEVQVAAAAAABAAAAAQ==
-    """
-
-    EUROPE_HELSINKI = b"""
-VFppZgAAAAAAAAAAAAAAAAAAAAAAAAAFAAAABQAAAAAAAAB1AAAABQAAAA2kc28Yy85RYMy/hdAV
-I+uQFhPckBcDzZAX876QGOOvkBnToJAaw5GQG7y9EBysrhAdnJ8QHoyQEB98gRAgbHIQIVxjECJM
-VBAjPEUQJCw2ECUcJxAmDBgQJwVDkCf1NJAo5SWQKdUWkCrFB5ArtPiQLKTpkC2U2pAuhMuQL3S8
-kDBkrZAxXdkQMnK0EDM9uxA0UpYQNR2dEDYyeBA2/X8QOBuUkDjdYRA5+3aQOr1DEDvbWJA8pl+Q
-Pbs6kD6GQZA/mxyQQGYjkEGEORBCRgWQQ2QbEEQl55BFQ/0QRgXJkEcj3xBH7uYQSQPBEEnOyBBK
-46MQS66qEEzMv5BNjowQTqyhkE9ubhBQjIOQUVeKkFJsZZBTN2yQVExHkFUXTpBWLCmQVvcwkFgV
-RhBY1xKQWfUoEFq29JBb1QoQXKAREF207BBef/MQX5TOEGBf1RBhfeqQYj+3EGNdzJBkH5kQZT2u
-kGYItZBnHZCQZ+iXkGj9cpBpyHmQat1UkGuoW5BsxnEQbYg9kG6mUxBvaB+QcIY1EHFRPBByZhcQ
-czEeEHRF+RB1EQAQdi8VkHbw4hB4DveQeNDEEHnu2ZB6sKYQe867kHyZwpB9rp2QfnmkkH+Of5AC
-AQIDBAMEAwQDBAMEAwQDBAMEAwQDBAMEAwQDBAMEAwQDBAMEAwQDBAMEAwQDBAMEAwQDBAMEAwQD
-BAMEAwQDBAMEAwQDBAMEAwQDBAMEAwQDBAMEAwQDBAMEAwQDBAMEAwQDBAMEAwQDBAMEAwQDBAME
-AwQAABdoAAAAACowAQQAABwgAAkAACowAQQAABwgAAlITVQARUVTVABFRVQAAAAAAQEAAAABAQ==
-    """
-
-    NEW_YORK = b"""
-VFppZgAAAAAAAAAAAAAAAAAAAAAAAAAEAAAABAAAABcAAADrAAAABAAAABCeph5wn7rrYKCGAHCh
-ms1gomXicKOD6eCkaq5wpTWnYKZTyvCnFYlgqDOs8Kj+peCqE47wqt6H4KvzcPCsvmngrdNS8K6e
-S+CvszTwsH4t4LGcUXCyZ0pgs3wzcLRHLGC1XBVwticOYLc793C4BvBguRvZcLnm0mC7BPXwu8a0
-YLzk1/C9r9DgvsS58L+PsuDApJvwwW+U4MKEffDDT3bgxGRf8MUvWODGTXxwxw864MgtXnDI+Fdg
-yg1AcMrYOWDLiPBw0iP0cNJg++DTdeTw1EDd4NVVxvDWIL/g1zWo8NgAoeDZFYrw2eCD4Nr+p3Db
-wGXg3N6JcN2pgmDevmtw34lkYOCeTXDhaUZg4n4vcONJKGDkXhFw5Vcu4OZHLfDnNxDg6CcP8OkW
-8uDqBvHw6vbU4Ovm0/Ds1rbg7ca18O6/02Dvr9Jw8J+1YPGPtHDyf5dg82+WcPRfeWD1T3hw9j9b
-YPcvWnD4KHfg+Q88cPoIWeD6+Fjw++g74PzYOvD9yB3g/rgc8P+n/+AAl/7wAYfh4AJ34PADcP5g
-BGD9cAVQ4GEGQN9yBzDCYgeNGXMJEKRjCa2U9ArwhmQL4IV1DNmi5Q3AZ3YOuYTmD6mD9xCZZucR
-iWX4EnlI6BNpR/kUWSrpFUkp+RY5DOoXKQv6GCIpaxkI7fsaAgtsGvIKfBvh7Wwc0ex8HcHPbR6x
-zn0fobFtIHYA/SGBk20iVeL+I2qv7iQ1xP4lSpHuJhWm/ycqc+8n/sOAKQpV8CnepYAq6jfxK76H
-gSzTVHItnmmCLrM2cy9+S4MwkxhzMWdoBDJy+nQzR0oENFLcdTUnLAU2Mr51NwcOBjgb2vY45vAG
-Ofu89jrG0gY72572PK/uhj27gPY+j9CGP5ti9kBvsoZBhH92Qk+UhkNkYXZEL3aHRURDd0XzqQdH
-LV/3R9OLB0kNQfdJs20HSu0j90uciYdM1kB3TXxrh062IndPXE2HUJYEd1E8L4dSdeZ3UxwRh1RV
-yHdU+/OHVjWqd1blEAdYHsb3WMTyB1n+qPdapNQHW96K91yEtgddvmz3XmSYB1+eTvdgTbSHYYdr
-d2ItlodjZ013ZA14h2VHL3dl7VqHZycRd2fNPIdpBvN3aa0eh2rm1XdrljsHbM/x9212HQdur9P3
-b1X/B3CPtfdxNeEHcm+X93MVwwd0T3n3dP7fh3Y4lnd23sGHeBh4d3i+o4d5+Fp3ep6Fh3vYPHd8
-fmeHfbged35eSYd/mAB3AAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQAB
-AAEAAQABAgMBAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQAB
-AAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEA
-AQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQAB
-AAEAAQABAAEAAQABAAEAAQABAAEAAf//x8ABAP//ubAABP//x8ABCP//x8ABDEVEVABFU1QARVdU
-AEVQVAAEslgAAAAAAQWk7AEAAAACB4YfggAAAAMJZ1MDAAAABAtIhoQAAAAFDSsLhQAAAAYPDD8G
-AAAABxDtcocAAAAIEs6mCAAAAAkVn8qJAAAACheA/goAAAALGWIxiwAAAAwdJeoMAAAADSHa5Q0A
-AAAOJZ6djgAAAA8nf9EPAAAAECpQ9ZAAAAARLDIpEQAAABIuE1ySAAAAEzDnJBMAAAAUM7hIlAAA
-ABU2jBAVAAAAFkO3G5YAAAAXAAAAAQAAAAE=
-    """
-
-    TZICAL_EST5EDT = """
-BEGIN:VTIMEZONE
-TZID:US-Eastern
-LAST-MODIFIED:19870101T000000Z
-TZURL:http://zones.stds_r_us.net/tz/US-Eastern
-BEGIN:STANDARD
-DTSTART:19671029T020000
-RRULE:FREQ=YEARLY;BYDAY=-1SU;BYMONTH=10
-TZOFFSETFROM:-0400
-TZOFFSETTO:-0500
-TZNAME:EST
-END:STANDARD
-BEGIN:DAYLIGHT
-DTSTART:19870405T020000
-RRULE:FREQ=YEARLY;BYDAY=1SU;BYMONTH=4
-TZOFFSETFROM:-0500
-TZOFFSETTO:-0400
-TZNAME:EDT
-END:DAYLIGHT
-END:VTIMEZONE
-    """
-
-    def testStrStart1(self):
-        self.assertEqual(datetime(2003, 4, 6, 1, 59,
-                                  tzinfo=tzstr("EST5EDT")).tzname(), "EST")
-        self.assertEqual(datetime(2003, 4, 6, 2, 00,
-                                  tzinfo=tzstr("EST5EDT")).tzname(), "EDT")
-
-    def testStrEnd1(self):
-        self.assertEqual(datetime(2003, 10, 26, 0, 59,
-                                  tzinfo=tzstr("EST5EDT")).tzname(), "EDT")
-        self.assertEqual(datetime(2003, 10, 26, 1, 00,
-                                  tzinfo=tzstr("EST5EDT")).tzname(), "EST")
-
-    def testStrStart2(self):
-        s = "EST5EDT,4,0,6,7200,10,0,26,7200,3600"
-        self.assertEqual(datetime(2003, 4, 6, 1, 59,
-                                  tzinfo=tzstr(s)).tzname(), "EST")
-        self.assertEqual(datetime(2003, 4, 6, 2, 00,
-                                  tzinfo=tzstr(s)).tzname(), "EDT")
-
-    def testStrEnd2(self):
-        s = "EST5EDT,4,0,6,7200,10,0,26,7200,3600"
-        self.assertEqual(datetime(2003, 10, 26, 0, 59,
-                                  tzinfo=tzstr(s)).tzname(), "EDT")
-        self.assertEqual(datetime(2003, 10, 26, 1, 00,
-                                  tzinfo=tzstr(s)).tzname(), "EST")
-
-    def testStrStart3(self):
-        s = "EST5EDT,4,1,0,7200,10,-1,0,7200,3600"
-        self.assertEqual(datetime(2003, 4, 6, 1, 59,
-                                  tzinfo=tzstr(s)).tzname(), "EST")
-        self.assertEqual(datetime(2003, 4, 6, 2, 00,
-                                  tzinfo=tzstr(s)).tzname(), "EDT")
-
-    def testStrEnd3(self):
-        s = "EST5EDT,4,1,0,7200,10,-1,0,7200,3600"
-        self.assertEqual(datetime(2003, 10, 26, 0, 59,
-                                  tzinfo=tzstr(s)).tzname(), "EDT")
-        self.assertEqual(datetime(2003, 10, 26, 1, 00,
-                                  tzinfo=tzstr(s)).tzname(), "EST")
-
-    def testStrStart4(self):
-        s = "EST5EDT4,M4.1.0/02:00:00,M10-5-0/02:00"
-        self.assertEqual(datetime(2003, 4, 6, 1, 59,
-                                  tzinfo=tzstr(s)).tzname(), "EST")
-        self.assertEqual(datetime(2003, 4, 6, 2, 00,
-                                  tzinfo=tzstr(s)).tzname(), "EDT")
-
-    def testStrEnd4(self):
-        s = "EST5EDT4,M4.1.0/02:00:00,M10-5-0/02:00"
-        self.assertEqual(datetime(2003, 10, 26, 0, 59,
-                                  tzinfo=tzstr(s)).tzname(), "EDT")
-        self.assertEqual(datetime(2003, 10, 26, 1, 00,
-                                  tzinfo=tzstr(s)).tzname(), "EST")
-
-    def testStrStart5(self):
-        s = "EST5EDT4,95/02:00:00,298/02:00"
-        self.assertEqual(datetime(2003, 4, 6, 1, 59,
-                                  tzinfo=tzstr(s)).tzname(), "EST")
-        self.assertEqual(datetime(2003, 4, 6, 2, 00,
-                                  tzinfo=tzstr(s)).tzname(), "EDT")
-
-    def testStrEnd5(self):
-        s = "EST5EDT4,95/02:00:00,298/02"
-        self.assertEqual(datetime(2003, 10, 26, 0, 59,
-                                  tzinfo=tzstr(s)).tzname(), "EDT")
-        self.assertEqual(datetime(2003, 10, 26, 1, 00,
-                                  tzinfo=tzstr(s)).tzname(), "EST")
-
-    def testStrStart6(self):
-        s = "EST5EDT4,J96/02:00:00,J299/02:00"
-        self.assertEqual(datetime(2003, 4, 6, 1, 59,
-                                  tzinfo=tzstr(s)).tzname(), "EST")
-        self.assertEqual(datetime(2003, 4, 6, 2, 00,
-                                  tzinfo=tzstr(s)).tzname(), "EDT")
-
-    def testStrEnd6(self):
-        s = "EST5EDT4,J96/02:00:00,J299/02"
-        self.assertEqual(datetime(2003, 10, 26, 0, 59,
-                                  tzinfo=tzstr(s)).tzname(), "EDT")
-        self.assertEqual(datetime(2003, 10, 26, 1, 00,
-                                  tzinfo=tzstr(s)).tzname(), "EST")
-
-    def testStrStr(self):
-        # Test that tzstr() won't throw an error if given a str instead
-        # of a unicode literal.
-        self.assertEqual(datetime(2003, 4, 6, 1, 59,
-                                  tzinfo=tzstr(str("EST5EDT"))).tzname(), "EST")
-        self.assertEqual(datetime(2003, 4, 6, 2, 00,
-                                  tzinfo=tzstr(str("EST5EDT"))).tzname(), "EDT")
-
-    def testStrCmp1(self):
-        self.assertEqual(tzstr("EST5EDT"),
-                         tzstr("EST5EDT4,M4.1.0/02:00:00,M10-5-0/02:00"))
-
-    def testStrCmp2(self):
-        self.assertEqual(tzstr("EST5EDT"),
-                         tzstr("EST5EDT,4,1,0,7200,10,-1,0,7200,3600"))
-
-    def testRangeCmp1(self):
-        self.assertEqual(tzstr("EST5EDT"),
-                         tzrange("EST", -18000, "EDT", -14400,
-                                 relativedelta(hours=+2,
-                                               month=4, day=1,
-                                               weekday=SU(+1)),
-                                 relativedelta(hours=+1,
-                                               month=10, day=31,
-                                               weekday=SU(-1))))
-
-    def testRangeCmp2(self):
-        self.assertEqual(tzstr("EST5EDT"),
-                         tzrange("EST", -18000, "EDT"))
-
-    def testFileStart1(self):
-        tz = tzfile(BytesIO(base64.decodestring(self.TZFILE_EST5EDT)))
-        self.assertEqual(datetime(2003, 4, 6, 1, 59, tzinfo=tz).tzname(), "EST")
-        self.assertEqual(datetime(2003, 4, 6, 2, 00, tzinfo=tz).tzname(), "EDT")
-
-    def testFileEnd1(self):
-        tz = tzfile(BytesIO(base64.decodestring(self.TZFILE_EST5EDT)))
-        self.assertEqual(datetime(2003, 10, 26, 0, 59, tzinfo=tz).tzname(),
-                         "EDT")
-        self.assertEqual(datetime(2003, 10, 26, 1, 00, tzinfo=tz).tzname(),
-                         "EST")
-
-    def testZoneInfoFileStart1(self):
-        tz = zoneinfo.gettz("EST5EDT")
-        self.assertEqual(datetime(2003, 4, 6, 1, 59, tzinfo=tz).tzname(), "EST",
-                         MISSING_TARBALL)
-        self.assertEqual(datetime(2003, 4, 6, 2, 00, tzinfo=tz).tzname(), "EDT")
-
-    def testZoneInfoFileEnd1(self):
-        tz = zoneinfo.gettz("EST5EDT")
-        self.assertEqual(datetime(2003, 10, 26, 0, 59, tzinfo=tz).tzname(),
-                         "EDT", MISSING_TARBALL)
-        self.assertEqual(datetime(2003, 10, 26, 1, 00, tzinfo=tz).tzname(),
-                         "EST")
-
-    def testZoneInfoOffsetSignal(self):
-        utc = zoneinfo.gettz("UTC")
-        nyc = zoneinfo.gettz("America/New_York")
-        self.assertNotEqual(utc, None, MISSING_TARBALL)
-        self.assertNotEqual(nyc, None)
-        t0 = datetime(2007, 11, 4, 0, 30, tzinfo=nyc)
-        t1 = t0.astimezone(utc)
-        t2 = t1.astimezone(nyc)
-        self.assertEqual(t0, t2)
-        self.assertEqual(nyc.dst(t0), timedelta(hours=1))
-
-    def testTzNameNone(self):
-        gmt5 = tzoffset(None, -18000)       # -5:00
-        self.assertIs(datetime(2003, 10, 26, 0, 0, tzinfo=gmt5).tzname(),
-                      None)
-
-
-    def testICalStart1(self):
-        tz = tzical(StringIO(self.TZICAL_EST5EDT)).get()
-        self.assertEqual(datetime(2003, 4, 6, 1, 59, tzinfo=tz).tzname(), "EST")
-        self.assertEqual(datetime(2003, 4, 6, 2, 00, tzinfo=tz).tzname(), "EDT")
-
-    def testICalEnd1(self):
-        tz = tzical(StringIO(self.TZICAL_EST5EDT)).get()
-        self.assertEqual(datetime(2003, 10, 26, 0, 59, tzinfo=tz).tzname(), "EDT")
-        self.assertEqual(datetime(2003, 10, 26, 1, 00, tzinfo=tz).tzname(), "EST")
-
-    def testRoundNonFullMinutes(self):
-        # This timezone has an offset of 5992 seconds in 1900-01-01.
-        tz = tzfile(BytesIO(base64.decodestring(self.EUROPE_HELSINKI)))
-        self.assertEqual(str(datetime(1900, 1, 1, 0, 0, tzinfo=tz)),
-                             "1900-01-01 00:00:00+01:40")
-
-    def testLeapCountDecodesProperly(self):
-        # This timezone has leapcnt, and failed to decode until
-        # Eugene Oden notified about the issue.
-        tz = tzfile(BytesIO(base64.decodestring(self.NEW_YORK)))
-        self.assertEqual(datetime(2007, 3, 31, 20, 12).tzname(), None)
-
-    def testGettz(self):
-        # bug 892569
-        str(gettz('UTC'))
-
-    def testBrokenIsDstHandling(self):
-        # tzrange._isdst() was using a date() rather than a datetime().
-        # Issue reported by Lennart Regebro.
-        dt = datetime(2007, 8, 6, 4, 10, tzinfo=tzutc())
-        self.assertEqual(dt.astimezone(tz=gettz("GMT+2")),
-                          datetime(2007, 8, 6, 6, 10, tzinfo=tzstr("GMT+2")))
-
-    def testGMTHasNoDaylight(self):
-        # tzstr("GMT+2") improperly considered daylight saving time.
-        # Issue reported by Lennart Regebro.
-        dt = datetime(2007, 8, 6, 4, 10)
-        self.assertEqual(gettz("GMT+2").dst(dt), timedelta(0))
-
-    def testGMTOffset(self):
-        # GMT and UTC offsets have inverted signal when compared to the
-        # usual TZ variable handling.
-        dt = datetime(2007, 8, 6, 4, 10, tzinfo=tzutc())
-        self.assertEqual(dt.astimezone(tz=tzstr("GMT+2")),
-                          datetime(2007, 8, 6, 6, 10, tzinfo=tzstr("GMT+2")))
-        self.assertEqual(dt.astimezone(tz=gettz("UTC-2")),
-                          datetime(2007, 8, 6, 2, 10, tzinfo=tzstr("UTC-2")))
-
-    @unittest.skipUnless(sys.platform.startswith("win"), "requires Windows")
-    def testIsdstZoneWithNoDaylightSaving(self):
-        tz = tzwin.tzwin("UTC")
-        dt = parse("2013-03-06 19:08:15")
-        self.assertFalse(tz._isdst(dt))
 
 # vim:ts=4:sw=4
